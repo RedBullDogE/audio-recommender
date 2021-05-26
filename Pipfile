@@ -1,0 +1,19 @@
+[[source]]
+verify_ssl = true
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[dev-packages]
+black = "*"
+
+[requires]
+python_version = "3.7"
+
+[packages]
+pandas = "*"
+flake8 = "*"
+black = "*"
+scikit-learn = "*"
+
+[pipenv]
+allow_prereleases = true
