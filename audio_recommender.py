@@ -1,126 +1,148 @@
 import pandas as pd
-from utils import to_1D
+from utils import normalize, to_1D
 
 
 class AudioRecommenderSystem:
     """
-    Основний клас рекомендаційної системи
+    Main class of audio recommender system
     """
 
-    def __init__(self, songdata_path, userdata_path, artistdata_path):
-        print("Initializing RS...")
-        print("Getting general song data")
-        # Метадані для пісень [song_id, title, release, artist_name, year]
-        song_metadata = pd.read_csv(songdata_path)
+    data_fields = ("song_df", "song_listens", "artist_df", "song_features")
 
-        print("Getting user data")
-        # Дані про кількість прослуховувань пісень користувачами [user_id, song_id, listen_count]
-        self.user_listens = pd.read_fwf(userdata_path)
-        self.user_listens.columns = ["user_id", "song_id", "listen_count"]
+    def __init__(self, song_df, song_listens, artist_df, song_features):
+        self.song_df = song_df
+        self.song_listens = song_listens
+        self.artist_df = artist_df
+        self.song_features = song_features
 
-        print("Merging song and user data")
-        # Дані лише з тими піснями, що мають прослуховування
-        # [song_id, title, artist_name, release, year, listen_count]
-        self.song_df_listens = pd.merge(
-            self.user_listens,
-            song_metadata.drop_duplicates(["song_id"]),
-            on="song_id",
-            how="left",
-        )
+    def reload_data(self, **kwargs):
+        """
+        Method for updating data
+        """
+        for field, data in kwargs.items():
+            if field in self.data_fields:
+                self.__dict__[field] = data
+            else:
+                raise AttributeError(
+                    f"Only attributes can be updated: {', '.join(self.data_fields)}"
+                )
 
-        print("Getting artist data")
-        # Розширення даних про пісні додатковим полем з жанрами
-        spotify_artists = pd.read_csv(artistdata_path)
+    def get_initial_recommendations_by_genres(self, genres: list):
+        """
+        Get initial recommendations by specified list of genres
+        """
+        res_count = 25
+        genres_count = len(genres)
+        songs_by_genre = res_count // genres_count
 
-        print("Making extended song data")
-        _grouped_song_df = (
-            self.song_df_listens.groupby(
-                ["song_id", "title", "artist_name", "release", "year"]
-            )
-            .agg({"listen_count": "count"})
-            .reset_index()
-        )
+        res = pd.concat(
+            [self.get_top_songs(genre, 100).sample(songs_by_genre) for genre in genres]
+        ).sample(frac=1)
 
-        self.extended_song_df = pd.merge(
-            _grouped_song_df,
-            spotify_artists,
-            left_on="artist_name",
-            right_on="name",
-            how="left",
-        )[
+        return res
+
+    def get_initial_recommendations_by_artists(self, artists: list):
+        """
+        Get initial recommendations by specified list of artists
+        """
+        res_count = 30
+        artist_count = len(artists) * 2
+        songs_by_artist = res_count // artist_count
+
+        similar_artists = pd.concat(
             [
-                "song_id",
-                "title",
-                "artist_name",
-                "release",
-                "year",
-                "listen_count",
-                "genres",
+                self.get_similar_artists(artist, 0.9, n=10).sample(2)
+                for artist in artists
             ]
-        ]
+        ).index.tolist()
 
-        self.extended_song_df = self.extended_song_df.dropna(subset=["genres"])
-        self.extended_song_df["genres"] = (
-            self.extended_song_df["genres"].apply(eval).apply(tuple)
-        )
+        res = pd.concat(
+            [
+                self.get_artist_songs(artist, 20)
+                .sample(songs_by_artist, replace=True)
+                .drop_duplicates("song_id")
+                for artist in similar_artists
+            ]
+        ).sample(frac=1)
 
-        print("Making extended artist data")
-        # Датафрейм з рейтингами виконавців
-        self.extended_artist_df = (
-            self.extended_song_df.groupby(["artist_name", "genres"])
-            .agg({"listen_count": "sum"})
-            .reset_index()
-        )
+        return res
 
-        print("RS successfully initialized")
-
-    def get_user_prefered_genres(self, user_id, n=15):
+    def get_user_prefered_genres(self, user_id: str, n=10):
         """
-        Жанри, що найчастіше зустрічаються у плейлисті користувача
+        Genres with most common genres in user's playlist
         """
+        if n is None:
+            n = 10
+
         user_song_data = pd.merge(
-            self.user_listens[self.user_listens["user_id"] == user_id],
-            self.extended_song_df,
+            self.song_listens[self.song_listens["user_id"] == user_id],
+            self.song_df,
             on="song_id",
         )
 
         counted_genres = to_1D(user_song_data["genres"]).value_counts()
         return counted_genres.head(n)
 
-    def get_top_songs_by_genre(self, genre, n=50):
+    def get_top_songs(self, genre=None, n=25):
         """
-        Топ пісень за вказаним жанром
+        Get top songs: general or by specified genre
         """
-        songs_of_genre = self.extended_song_df[
-            self.extended_song_df["genres"].apply(lambda x: genre in x)
-        ]
-        top_songs = songs_of_genre.sort_values("listen_count", ascending=False)
+        if n is None:
+            n = 25
+        songs = self.song_df
+
+        if genre:
+            songs = self.song_df[self.song_df["genres"].apply(lambda x: genre in x)]
+
+        top_songs = songs.sort_values("listen_count", ascending=False)
 
         return top_songs.head(n)
 
-    def get_top_artists_by_genre(self, genre):
+    def get_top_artists(self, genre=None, n=10):
         """
-        Топ артистів за вказаним жанром
+        Get top artists: general or by specified genre
         """
-        artist_in_genre = self.extended_artist_df[
-            self.extended_artist_df["genres"].apply(lambda x: genre in x)
-        ]
+        if n is None:
+            n = 10
 
-        return artist_in_genre.sort_values(
-            "listen_count", ascending=False
-        ).reset_index()
+        artists = self.artist_df
 
-    def get_similar_songs_cf(self, song_id, min_sim_coef):
+        if genre:
+            artists = self.artist_df[
+                self.artist_df["genres"].apply(lambda x: genre in x)
+            ]
+
+        top_artists = artists.sort_values("listen_count", ascending=False).reset_index()
+
+        return top_artists.head(n)
+
+    def get_artist_songs(self, artist: str, n=10):
         """
-        Колаборативна фільтрація за схожістю сутностей (пісень)
+        Get artist's songs
         """
+        return self.song_df[self.song_df["artist_name"] == artist].head(n)
+
+    def get_similar_songs_cf(self, song_id, min_sim_coef=0.9, n=25):
+        """
+        Using collaborative filtering to find similar songs
+        """
+        if min_sim_coef is None:
+            min_sim_coef = 0.9
+
+        if n is None:
+            n = 25
+
         song_rating_matrix = pd.pivot_table(
-            self.song_df_listens,
+            self.song_listens[["user_id", "listen_count", "song_id"]],
             values="listen_count",
             index="user_id",
             columns="song_id",
         )
-        target_song_row = song_rating_matrix[song_id]
+
+        try:
+            target_song_row = song_rating_matrix[song_id]
+        except KeyError:
+            return pd.DataFrame()
 
         song_similarity = (
             pd.DataFrame(
@@ -131,85 +153,94 @@ class AudioRecommenderSystem:
             .dropna()
         )
 
-        result = song_similarity.merge(self.extended_song_df).sort_values(
+        result = song_similarity.merge(self.song_df).sort_values(
             by="similarity", ascending=False
         )
         result = result[
             (min_sim_coef < result["similarity"]) & (result["similarity"] < 0.9999)
         ]
 
-        return result.reset_index()
+        return result.head(n)
 
-    def get_similar_songs_cbf(self, song_id):
+    def get_similar_songs_cbf(self, song_id, min_sim_coef=0.5, n=25):
         """
-        Фільтрація за змістом, враховує схожість пісень за їх жанрами та параметрами
+        Using content-based filtering to find similar songs
         """
-        pass
+        if min_sim_coef is None:
+            min_sim_coef = 0.9
 
-
-if __name__ == "__main__":
-    print("Initializing RS...")
-    print("Getting general song data")
-    # Метадані для пісень [song_id, title, release, artist_name, year]
-    song_metadata = pd.read_csv(songdata_path)
-
-    print("Getting user data")
-    # Дані про кількість прослуховувань пісень користувачами [user_id, song_id, listen_count]
-    user_listens = pd.read_fwf(userdata_path)
-    user_listens.columns = ["user_id", "song_id", "listen_count"]
-
-    print("Merging song and user data")
-    # Дані лише з тими піснями, що мають прослуховування
-    # [song_id, title, artist_name, release, year, listen_count]
-    song_df_listens = pd.merge(
-        user_listens,
-        song_metadata.drop_duplicates(["song_id"]),
-        on="song_id",
-        how="left",
-    )
-
-    print("Getting artist data")
-    # Розширення даних про пісні додатковим полем з жанрами
-    spotify_artists = pd.read_csv(artistdata_path)
-
-    print("Making extended song data")
-    _grouped_song_df = (
-        song_df_listens.groupby(
-            ["song_id", "title", "artist_name", "release", "year"]
-        )
-        .agg({"listen_count": "count"})
-        .reset_index()
-    )
-
-    extended_song_df = pd.merge(
-        _grouped_song_df,
-        spotify_artists,
-        left_on="artist_name",
-        right_on="name",
-        how="left",
-    )[
-        [
-            "song_id",
-            "title",
-            "artist_name",
-            "release",
-            "year",
-            "listen_count",
-            "genres",
+        if n is None:
+            n = 25
+        cols = [
+            "valence",
+            "acousticness",
+            "danceability",
+            "duration_ms",
+            "energy",
+            "instrumentalness",
+            "liveness",
+            "loudness",
+            "speechiness",
+            "tempo",
         ]
-    ]
+        normalized_song_features = normalize(self.song_features, cols)
+        song = normalized_song_features[normalized_song_features["song_id"] == song_id]
+        corr_vector = normalized_song_features[cols].corrwith(
+            song[cols].squeeze(), axis=1
+        )
 
-    extended_song_df = extended_song_df.dropna(subset=["genres"])
-    extended_song_df["genres"] = (
-        extended_song_df["genres"].apply(eval).apply(tuple)
-    )
+        result = pd.merge(
+            self.song_features,
+            corr_vector.rename("similarity"),
+            left_index=True,
+            right_index=True,
+        ).sort_values("similarity", ascending=False)[
+            ["song_id", "title", "artist_name", "similarity"]
+        ]
 
-    print("Making extended artist data")
-    # Датафрейм з рейтингами виконавців
-    extended_artist_df = (
-        extended_song_df.groupby(["artist_name", "genres"])
-        .agg({"listen_count": "sum"})
-        .reset_index()
-    )
+        result = result[
+            (min_sim_coef < result["similarity"]) & (result["similarity"] < 0.9999)
+        ]
 
-    print("RS successfully initialized")
+        return result.head(n)
+
+    def get_similar_artists(self, artist_name, min_sim_coef=0.5, n=10):
+        """
+        Using content-based filtering to find similar artists
+        """
+
+        cols = [
+            "valence",
+            "acousticness",
+            "danceability",
+            "duration_ms",
+            "energy",
+            "instrumentalness",
+            "liveness",
+            "loudness",
+            "speechiness",
+            "tempo",
+        ]
+
+        normalized_artist_features = normalize(self.artist_df, cols)
+        normalized_artist_features = normalized_artist_features[cols].astype(float)
+        artist = normalized_artist_features.loc[artist_name]
+
+        corr_vector = normalized_artist_features[cols].corrwith(artist[cols], axis=1)
+
+        result = (
+            pd.merge(
+                self.artist_df,
+                corr_vector.rename("similarity"),
+                left_index=True,
+                right_index=True,
+            )
+            .drop(cols, axis=1)
+            .sort_values("similarity", ascending=False)
+        )
+
+        result = result[
+            (min_sim_coef < result["similarity"]) & (result["similarity"] < 0.9999)
+        ]
+
+        return result
